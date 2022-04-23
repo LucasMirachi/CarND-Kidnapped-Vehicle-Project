@@ -20,6 +20,8 @@
 
 using std::string;
 using std::vector;
+std::default_random_engine gen;
+
 
 void ParticleFilter::init(double x, double y, double theta, double std[]) {
   /**
@@ -30,8 +32,36 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
    * NOTE: Consult particle_filter.h for more information about this method 
    *   (and others in this file).
    */
-  num_particles = 0;  // TODO: Set the number of particles
+  // Setting the number of particles
+  num_particles = 1000;
 
+  //@param std[] Array of dimension 3 [standard deviation of x [m], standard deviation of y [m], standard deviation of yaw [rad]]
+  double std_x = std[0];
+  double std_y = std[1];
+  double std_theta = std[2];
+  
+  // Creating Normal/Gaussian Distribution for x, y and theta
+  std::normal_distribution<double> normal_dist_x(x, std_x);
+  std::normal_distribution<double> normal_dist_y(y, std_y);
+  std::normal_distribution<double> normal_dist_theta(theta, std_theta);
+  
+  // Initializing all particles to first position and adding random Gaussian noise to each particle
+  for (int i = 0; i < num_particles; ++i) {
+    //Using the struct Particle (declared in particle_filter.h)
+    Particle particle;
+    particle.id = i;
+    //@param x Initial x position [m] (simulated estimate from GPS); normal_dist_ is the normal distribution (and 'gen' is the random engine)
+    particle.x = normal_dist_x(gen);
+    //@param y Initial y position [m]
+    particle.y = normal_dist_y(gen);
+    //@param theta Initial orientation [rad]
+    particle.theta = normal_dist_theta(gen);
+    //Initializing all weights to 1
+    particle.weight = 1.0;
+  }
+  
+  //flag if filter is initialized
+  is_initialized = true;
 }
 
 void ParticleFilter::prediction(double delta_t, double std_pos[], 
@@ -43,7 +73,31 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
    *  http://en.cppreference.com/w/cpp/numeric/random/normal_distribution
    *  http://www.cplusplus.com/reference/random/default_random_engine/
    */
+  
+  // Creating Normal/Gaussian distribution for x, y and theta noises
+  //@param std_pos[] Array of dimension 3 [standard deviation of x [m], standard deviation of y [m], standard deviation of yaw [rad]]
+  std::normal_distribution<double> normal_dist_x(0, std_pos[0]);
+  std::normal_distribution<double> normal_dist_y(0, std_pos[1]);
+  std::normal_distribution<double> normal_dist_theta(0, std_pos[2]);
 
+  for (int i = 0; i < num_particles; i++) {
+    //Depending on if yaw_rate is zero or not, we're gonna add different measurements hete
+    if (abs(yaw_rate) !=0) {
+      particles[i].x += (velocity/yaw_rate) * (sin(particles[i].theta + (yaw_rate * delta_t)) - sin(particles[i].theta));
+      particles[i].y += (velocity/yaw_rate) * (cos(particles[i].theta - cos(particles[i].theta + (yaw_rate * delta_t))));
+      particles[i].theta += yaw_rate * delta_t;
+                                              
+    } else {
+      particles[i].x += velocity * delta_t * cos(particles[i].theta);
+      particles[i].y += velocity * delta_t * sin(particles[i].theta);
+      //Because, in this case yaw_rate equalts to 0, theta will stay the same
+    }
+                                              
+      //Adding noise to particles
+      particles[i].x += normal_dist_x(gen);
+      particles[i].y += normal_dist_y(gen);
+      particles[i].theta += normal_dist_theta(gen);                                        
+  }
 }
 
 void ParticleFilter::dataAssociation(vector<LandmarkObs> predicted, 
@@ -56,6 +110,29 @@ void ParticleFilter::dataAssociation(vector<LandmarkObs> predicted,
    *   probably find it useful to implement this method and use it as a helper 
    *   during the updateWeights phase.
    */
+  
+  for (unsigned int i = 0; i < observations.size(); i++) {
+    
+    // min distance to max
+    double min_dist = std::numeric_limits<double>::max();
+    
+    int map_id = -1;
+    
+    for (unsigned int j = 0; j < predicted.size(); j++) {
+      
+      // get distance bteween current/predicted landmarks
+      double current_dist = dist(observations[i].x, observations[i].y, predicted[j].x, predicted[j].y);
+      
+      //find predicted landmark nearest the current observed landmark
+      if (current_dist < min_dist) {
+        min_dist = current_dist;
+        map_id = predicted[j].id;
+      }
+    }
+ 
+    // set the observation's id to the nearest predicted landmark's id
+    observations[i].id = map_id;
+  }
 
 }
 
@@ -75,7 +152,43 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
    *   and the following is a good resource for the actual equation to implement
    *   (look at equation 3.33) http://planning.cs.uiuc.edu/node99.html
    */
+  
+  //Step 1: TRANSFORM each observation marker form the vehicle's coordinates to the map's coordinates -> In this step, I'll loop through the observations and create a transformed observation vector of transformed coordinates
+  for(int i = 0; i < num_particles; i++) {
+    double x = particles[i].x;
+    double y = particles[i].y;
+    double theta = particles[i].theta;
+  
+    vector<LandmarkObs> predictions;
+    
+    //Each map landmark for loop
+    for(unsigned int j = 0; j < map_landmarks.landmark_list.size(); j++) {
+      //Get id and x,y coordinates
+      float lm_x = map_landmarks.landmark_list[j].x_f;
+      float lm_y = map_landmarks.landmark_list[j].y_f;
+      int lm_id = map_landmarks.landmark_list[j].id_i;
+    
+      if(fabs(lm_x - x) <= sensor_range && fabs(lm_y - y) <= sensor_range) {
+        predictions.push_back(LandmarkObs{ lm_id, lm_x, lm_y });
+      }
+    }
+    
+    vector<LandmarkObs> transObs;
+    for (unsigned int j = 0; j < observations.size(); j++) {
+      double tx = x + cos(theta) * observations[j].x - sin(theta) * observations[j].y;
+      double ty = y + sin(theta) * observations[j].x + cos(theta) * observations[j].y;
+      transObs.push_back(LandmarkObs{observations[j].id, tx, ty});
+    }
+  
+  //Step 2: ENSURE map landmarks are inside sensor range -> Here, I'll loop through the map landmarks and find the ones which are within sensor range
+  
+  
+  //Step 3: Nearest Neighbor Data Association -> Here, I'll do data asociation between "Step 1" and "Step 2" vectors
+  
+  
+  //Step 4: Compute WEIGHT of particle
 
+  
 }
 
 void ParticleFilter::resample() {
@@ -85,6 +198,30 @@ void ParticleFilter::resample() {
    * NOTE: You may find std::discrete_distribution helpful here.
    *   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
    */
+  
+    // Get weights and max weight.
+    vector<double> weights;
+    double maxWeight = std::numeric_limits<double>::min();
+    for (int i = 0; i < num_particles; i++) {
+        weights.push_back(particles[i].weight);
+        if (particles[i].weight > maxWeight) {
+            maxWeight = particles[i].weight;
+        }
+    }
+    uniform_real_distribution<float> dist_float(0.0, maxWeight);
+    uniform_real_distribution<float> dist_int(0.0, num_particles - 1);
+    int index = dist_int(gen);
+    double beta = 0.0;
+    vector<Particle> resampledParticles;
+    for (int i = 0; i < num_particles; i++) {
+        beta += dist_float(gen) * 2.0;
+        while (beta > weights[index]) {
+            beta -= weights[index];
+            index = (index + 1) % num_particles;
+        }
+        resampledParticles.push_back(particles[index]);
+    }
+    particles = resampledParticles;  
 
 }
 
